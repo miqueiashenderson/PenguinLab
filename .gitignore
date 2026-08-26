@@ -1,0 +1,16 @@
+# Obsidian editor config
+.obsidian/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

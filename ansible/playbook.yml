@@ -1,0 +1,35 @@
+---
+- name: Provisionar maquinas PenguinLab
+  hosts: penguinlab
+  become: true
+
+  tasks:
+    - name: Copiar script de provisionamento
+      ansible.builtin.copy:
+        src: ../provision-penguinlab.sh
+        dest: /tmp/provision-penguinlab.sh
+        mode: "0755"
+
+    - name: Executar script de provisionamento
+      ansible.builtin.command: /tmp/provision-penguinlab.sh
+      register: resultado
+      changed_when: false
+
+    - name: Exibir resultado do provisionamento
+      ansible.builtin.debug:
+        var: resultado.stdout_lines
+
+    - name: Remover script temporario
+      ansible.builtin.file:
+        path: /tmp/provision-penguinlab.sh
+        state: absent
+      changed_when: false
+
+    # Descomente a linha abaixo para reiniciar as maquinas apos provisionamento.
+    # CUIDADO: isso reiniciara TODAS as maquinas do grupo simultaneamente.
+    # Recomendacao: teste primeiro com --limit em uma unica maquina.
+    #
+    # - name: Reiniciar maquinas
+    #   ansible.builtin.reboot:
+    #     msg: "Reiniciando para aplicar configuracoes PenguinLab"
+    #     reboot_timeout: 300
