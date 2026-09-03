@@ -69,6 +69,11 @@ setup_dns() {
     fi
 
     # Configurar /etc/systemd/resolved.conf
+    if [ ! -f /etc/systemd/resolved.conf.penguinlab.bak ]; then
+        cp /etc/systemd/resolved.conf /etc/systemd/resolved.conf.penguinlab.bak 2>/dev/null || true
+        log "Backup de resolved.conf original salvo em resolved.conf.penguinlab.bak."
+    fi
+
     cat > /etc/systemd/resolved.conf << EOF
 [Resolve]
 DNS=${DNS_PRIMARIO} ${DNS_SECUNDARIO}
@@ -207,6 +212,13 @@ POLICIES
 setup_user() {
     log "--- Configurando usuario $USUARIO ---"
 
+    if [ "$SENHA_ALUNO" == "aluno" ]; then
+        aviso "================================================================"
+        aviso "ATENCAO: usando a senha PADRAO ('aluno') para o usuario aluno."
+        aviso "Defina PENGUINLAB_PASSWORD antes de rodar em producao."
+        aviso "================================================================"
+    fi
+
     # Criar usuario (idempotente)
     if id "$USUARIO" &>/dev/null; then
         log "Usuario $USUARIO ja existe."
@@ -245,7 +257,7 @@ SUDOERS
     fi
 
     # Configurar polkit para bloquear acoes administrativas (formato JS rules)
-    if ! dpkg -l polkitd &>/dev/null; then
+    if ! dpkg -s polkitd 2>/dev/null | grep -q "^Status: install ok installed"; then
         aviso "polkitd nao instalado. Regras polkit nao aplicadas."
     else
         mkdir -p /etc/polkit-1/rules.d
@@ -271,6 +283,67 @@ RULES
         log "  - Montagem de discos bloqueada"
         log "  - Gerenciamento de servicos systemd bloqueado"
     fi
+}
+
+# ============================================================
+# RESTRICAO DE LOGIN SSH PARA O ALUNO
+# ============================================================
+setup_ssh_restriction() {
+    log "--- Restringindo acesso SSH do usuario $USUARIO ---"
+
+    if ! command -v sshd &>/dev/null; then
+        aviso "sshd nao encontrado. Restricao de SSH nao aplicada."
+        return 0
+    fi
+
+    local drop_in="/etc/ssh/sshd_config.d/90-penguinlab-no-ssh-aluno.conf"
+    cat > "$drop_in" << EOF
+# PenguinLab: impede login SSH remoto para o usuario $USUARIO
+DenyUsers $USUARIO
+EOF
+
+    if sshd -t 2>/dev/null; then
+        systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true
+        log "Login SSH bloqueado para '$USUARIO' ($drop_in)."
+    else
+        erro "Configuracao SSH invalida! Removendo arquivo."
+        rm -f "$drop_in"
+        return 1
+    fi
+}
+
+# ============================================================
+# AUTO-LOGIN DO ALUNO (LightDM / Slick Greeter)
+# ============================================================
+setup_autologin() {
+    log "--- Configurando auto-login do usuario $USUARIO ---"
+
+    # Arquivo principal do LightDM. No Mint/Ubuntu desktop e /etc/lightdm/lightdm.conf.
+    local conf="/etc/lightdm/lightdm.conf"
+
+    if [ ! -f "$conf" ]; then
+        aviso "LightDM nao encontrado ($conf). Auto-login nao configurado."
+        return 0
+    fi
+
+    # Garantir que o grupo autologin existe e o aluno pertence a ele
+    # (necessario em alguns sistemas para o LightDM liberar o autologin)
+    if getent group autologin >/dev/null 2>&1; then
+        usermod -a -G autologin "$USUARIO" 2>/dev/null || true
+        log "Usuario $USUARIO adicionado ao grupo 'autologin'."
+    fi
+
+    # Remover chaves de autologin existentes (idempotencia: evita duplicatas)
+    sed -i "/^autologin-user=/d; /^autologin-user-timeout=/d" "$conf" 2>/dev/null || true
+
+    # Garantir a secao [Seat:*] com as chaves (cria a secao se nao existir)
+    if grep -q "^\[Seat:\*\]" "$conf"; then
+        sed -i "/^\[Seat:\*\]/a autologin-user=$USUARIO\nautologin-user-timeout=0" "$conf" 2>/dev/null || true
+    else
+        printf '\n[Seat:*]\nautologin-user=%s\nautologin-user-timeout=0\n' "$USUARIO" >> "$conf"
+    fi
+
+    log "Auto-login configurado: $USUARIO entra automaticamente na proxima inicializacao."
 }
 
 # ============================================================
@@ -301,7 +374,11 @@ summary() {
     log "   - Shell: /bin/bash (terminal NAO restrito)"
     log "   - Grupos administrativos removidos"
     log "   - sudo bloqueado via /etc/sudoers.d/"
+    log "   - Login SSH remoto bloqueado"
     log "   - Politicas polkit configuradas"
+    log ""
+    log "4. Auto-login"
+    log "   - Usuario $USUARIO entra automaticamente ao ligar a maquina"
     log ""
     log "Log completo: $LOGFILE"
     log ""
@@ -326,6 +403,8 @@ main() {
     setup_dns
     setup_firefox
     setup_user
+    setup_ssh_restriction
+    setup_autologin
 
     summary
 }

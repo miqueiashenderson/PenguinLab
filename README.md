@@ -81,14 +81,18 @@ ansible_user=professor
 **Teste em uma unica maquina primeiro:**
 ```bash
 cd ansible/
-ansible-playbook -i inventory.ini playbook.yml --limit penguinlab-01
+export PENGUINLAB_PASSWORD='senha-forte-aqui'
+ansible-playbook -i inventory.ini playbook.yml --limit penguinlab-01 -e "penguinlab_password=$PENGUINLAB_PASSWORD"
 ```
 
 **Executar em todas as 14 maquinas:**
 ```bash
 cd ansible/
-ansible-playbook -i inventory.ini playbook.yml
+export PENGUINLAB_PASSWORD='senha-forte-aqui'
+ansible-playbook -i inventory.ini playbook.yml -e "penguinlab_password=$PENGUINLAB_PASSWORD"
 ```
+
+> **IMPORTANTE (segurança):** por padrão a senha do usuário `aluno` é a fraca e previsível `aluno` (`PENGUINLAB_PASSWORD` não definida). Em produção, **defina sempre** `PENGUINLAB_PASSWORD` com uma senha forte antes de rodar. O playbook propaga essa variável ao script remoto via `environment:`, então a senha definida aqui é aplicada de fato na máquina. Se você rodar sem definir a variável, o script imprime um aviso bem visível antes de continuar.
 
 ### Reiniciar as maquinas (opcional)
 
@@ -116,6 +120,7 @@ Apos cada execucao do provisionamento, validar se tudo ficou correto antes de li
 | Firefox policies | Abrir `about:policies` no Firefox | Todas as restricoes visiveis |
 | Firefox sem seu proprio DNS | `about:policies` → `DNSOverHTTPS` | `Enabled: false, Locked: true` |
 | Usuario nao tem sudo | `sudo -l` (como `aluno`) | `not allowed` |
+| Aluno nao loga via SSH | `ssh aluno@<ip-da-maquina>` (a partir de outra maquina) | Conexao recusada |
 | polkit bloqueia NM | `pkexec nm-connection-editor` (como `aluno`) | Pede senha de admin ou falha |
 | polkit bloqueia install | `pkexec apt install hello` (como `aluno`) | Falha / pede senha |
 | Shell do aluno livre | `su - aluno` → `echo $SHELL` | `/bin/bash` |
@@ -133,15 +138,23 @@ visudo -c   # validar antes de continuar
 rm -f /etc/polkit-1/rules.d/90-penguinlab-restrict.rules
 systemctl restart polkit
 
-# 3. Restaurar DNS padrao
+# 3. Remover bloqueio de SSH do aluno
+rm -f /etc/ssh/sshd_config.d/90-penguinlab-no-ssh-aluno.conf
+sshd -t && (systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true)
+
+# 4. Restaurar DNS padrao
 rm -f /etc/NetworkManager/conf.d/99-penguinlab-dns.conf
-rm -f /etc/systemd/resolved.conf
+if [ -f /etc/systemd/resolved.conf.penguinlab.bak ]; then
+    mv /etc/systemd/resolved.conf.penguinlab.bak /etc/systemd/resolved.conf
+else
+    rm -f /etc/systemd/resolved.conf
+fi
 systemctl restart systemd-resolved NetworkManager
 
-# 4. Remover policies do Firefox
+# 5. Remover policies do Firefox
 rm -f /etc/firefox/policies/policies.json
 
-# 5. Remover usuario aluno (opcional — remove home tbm)
+# 6. Remover usuario aluno (opcional — remove home tbm)
 userdel -r aluno 2>/dev/null || true
 ```
 

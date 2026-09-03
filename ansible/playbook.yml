@@ -12,6 +12,8 @@
 
     - name: Executar script de provisionamento
       ansible.builtin.command: /tmp/provision-penguinlab.sh
+      environment:
+        PENGUINLAB_PASSWORD: "{{ penguinlab_password | default('aluno') }}"
       register: resultado
       changed_when: false
 

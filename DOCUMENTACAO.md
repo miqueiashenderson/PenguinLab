@@ -39,9 +39,13 @@ PenguinLab/
 ├── provision-penguinlab.sh    # Script principal, idempotente, roda com sudo
 ├── ansible/
 │   ├── playbook.yml           # Aplica o script via SSH nas maquinas
-│   └── inventory.ini          # Inventario de exemplo (14 maquinas)
+│   ├── inventory.ini          # Inventario de exemplo (14 maquinas)
+│   ├── bootstrap-ssh.sh       # Descobre IPs + prepara SSH/openssh em lote
+│   ├── check-status.sh        # Verifica status de provisao remotamente
+│   └── ansible.cfg            # Paralelismo (forks=14) e timeout
 ├── README.md                   # Guia de uso
 ├── DOCUMENTACAO.md             # Este arquivo
+├── IMPLANTACAO.md              # Passo a passo pratico de implantacao
 ├── .gitignore
 └── .opencodeignore
 ```
@@ -53,6 +57,7 @@ PenguinLab/
 | `setup_dns()` | Configura Cloudflare for Families via systemd-resolved, DNS-over-TLS, impede NM de sobrescrever |
 | `setup_firefox()` | Escreve /etc/firefox/policies/policies.json com restricoes enterprise |
 | `setup_user()` | Cria/idempotente `aluno`, remove de sudo/admin, bloqueia sudo via sudoers.d, configura polkit JS rules |
+| `setup_ssh_restriction()` | Bloqueia login SSH remoto do `aluno` via `/etc/ssh/sshd_config.d/` |
 | `summary()` | Exibe resumo do que foi aplicado |
 
 ### Configuracao (variaveis no topo do script)
@@ -135,6 +140,10 @@ O provision-script usa o formato moderno JS rules (`/etc/polkit-1/rules.d/`). Se
 
 Usado em vez de `yes` para evitar falhas de resolucao em redes que nao suportam DNS-over-TLS (firewall bloqueando porta 853). Tenta, nao falha se nao funcionar.
 
+### Limitação conhecida: bypass de DNS filtrado via outros navegadores/AppImages
+
+O filtro de DNS (Cloudflare for Families) + as políticas do Firefox **não** impedem que `aluno` baixe um AppImage de outro navegador com DNS-over-HTTPS embutido, contornando a filtragem no nível de rede. Mitigação completa exigiria um firewall bloqueando os endpoints/portas de DoH conhecidos — isso está **fora de escopo** deste projeto e permanece como limitação conhecida.
+
 ---
 
 ## 6. Auto-Login e Dual Profile (aluno vs professor)
@@ -151,12 +160,12 @@ Duas contas com comportamentos diferentes na tela de login (Slick Greeter + Ligh
 O Mint 22.x usa Slick Greeter como padrao. A configuracao de autologin vai em:
 
 ```
-/etc/lightdm/slick-greeter.conf
+/etc/lightdm/lightdm.conf
 ```
 
 Conteudo necesario para autologin do `aluno`:
 ```ini
-[Greeter]
+[Seat:*]
 autologin-user=aluno
 autologin-user-timeout=0
 ```
@@ -165,15 +174,18 @@ O `professor` nao recebe autologin — aparece na tela de login normal e precisa
 
 ### Relacao com o provision-script
 
-O `provision-penguinlab.sh` atual nao configura o auto-login. A funcao `setup_user()` trata apenas de criar o usuario e restringir permissoes. O auto-login e uma configuracao separada que pode ser adicionada futuramente ao provision-script.
+O `provision-penguinlab.sh` agora configura o auto-login automaticamente na funcao `setup_autologin()`, executada apos `setup_user()` (garante que o usuario `aluno` ja existe antes do LightDM tentar autologin). Ele:
+- Edita `/etc/lightdm/lightdm.conf` adicionando `autologin-user=aluno` e `autologin-user-timeout=0` na secao `[Seat:*]`, de forma idempotente.
+- Adiciona `aluno` ao grupo `autologin` (quando o grupo existe).
+- Ignora (`aviso`) se o LightDM nao estiver presente.
 
-### Como configurar manualmente (para estudar)
+### Como configurar manualmente (se necessario)
 
-1. Editar `/etc/lightdm/slick-greeter.conf`
-2. Adicionar `autologin-user=aluno` e `autologin-user-timeout=0`
+1. Editar `/etc/lightdm/lightdm.conf`
+2. Adicionar `autologin-user=aluno` e `autologin-user-timeout=0` na secao `[Seat:*]`
 3. Reiniciar o LightDM: `sudo systemctl restart lightdm`
 
-**Importante**: se o `aluno` nao existir no sistema, o LightDM vai falhar ao tentar autologin. Por isso o autologin do `aluno` deve ser configurado apos o `aluno` ser criado (pelo provision-script ou manualmente).
+**Importante**: se o `aluno` nao existir no sistema, o LightDM vai falhar ao tentar autologin. Por isso o autologin do `aluno` deve ser configurado apos o `aluno` ser criado (o provision-script ja faz isso na ordem correta).
 
 ---
 
@@ -185,6 +197,13 @@ O `provision-penguinlab.sh` atual nao configura o auto-login. A funcao `setup_us
 | polkit .pkla ignorado | Critico | Ubuntu 24.04 nao tem `polkitd-pkla` instalado por padrao — arquivo `.pkla` eh silenciosamente ignorado | Trocar para JS rules em `/etc/polkit-1/rules.d/` |
 | Chaves JSON duplicadas | Moderado | `DisableSystemAddonUpdate`, `DisableTelemetry` etc. duplicados no policies.json | Reorganizar e remover duplicatas |
 | Log sobrescrito | Menor | `init_log()` usava `>` (sobrescreve) | Trocado para `>>` (append) |
+| Chave SSH sobrescrita a cada bootstrap | Critico | `ssh-keygen` respondia "y" ao prompt de overwrite, invalidando acesso ja configurado | So gerar chave se ainda nao existir |
+| Checagem de grupos admin nunca rodava | Alto | Condicao externa no check-status.sh nunca era verdadeira, checagem #3 nunca era exibida | Removido `if` externo morto |
+| Doc de autologin desatualizada | Moderado | DOCUMENTACAO.md citava slick-greeter.conf, script usa lightdm.conf | Doc corrigida para bater com o codigo |
+| Login SSH remoto do aluno nao bloqueado | Alto (seguranca) | Usuario aluno podia autenticar via SSH remotamente | Nova funcao setup_ssh_restriction() com DenyUsers |
+| Senha padrao previsivel | Moderado (seguranca) | Todas as maquinas usavam "aluno"/"aluno" se PENGUINLAB_PASSWORD nao definida | Aviso visivel + doc exigindo senha forte em producao |
+| resolved.conf sobrescrito sem backup | Baixo | Configuracoes DNS originais eram perdidas permanentemente | Backup automatico antes de sobrescrever |
+| Deteccao de polkit falha (dpkg -l) | Baixo | dpkg -l retornava 0 mesmo com pacote removido, mascarando ausencia do polkit | Trocado para dpkg -s com checagem de status |
 
 ---
 
@@ -207,12 +226,12 @@ Alem dos 4 acima, o projeto original tinha:
 
 ## 9. Roadmap Futuro (Nao Implementado Ainda)
 
-- [ ] Auto-login do `aluno` no Slick Greeter
-- [ ] Script `bootstrap-ssh.sh` (descobre IPs + copia chave SSH em lote)
-- [ ] Secao pos-deploy / checklist de verificacao no README
-- [ ] Rollback plan documentado
-- [ ] Script `check-status.sh` para verificar status de provisao
-- [ ] `ansible.cfg` com `forks = 14` para paralelismo total
+- [x] Auto-login do `aluno` no Slick Greeter (implementado no provision-script)
+- [x] Script `bootstrap-ssh.sh` (descobre IPs + copia chave SSH em lote)
+- [x] Secao pos-deploy / checklist de verificacao no README
+- [x] Rollback plan documentado
+- [x] Script `check-status.sh` para verificar status de provisao
+- [x] `ansible.cfg` com `forks = 14` para paralelismo total
 
 ---
 
@@ -302,7 +321,7 @@ Nas 14 maquinas (cada uma):
     - DNS filtrado ativo (Cloudflare for Families)
     - Firefox com policies restritivas
     - Usuario 'aluno' criado (sem sudo, sem admin)
-    - Auto-login do 'aluno' (configurar no slick-greeter.conf)
+    - Auto-login do 'aluno' (configurar no lightdm.conf)
     - Reiniciar a maquina
 ```
 
