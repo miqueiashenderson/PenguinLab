@@ -14,6 +14,7 @@
       ansible.builtin.command: /tmp/provision-penguinlab.sh
       environment:
         PENGUINLAB_PASSWORD: "{{ penguinlab_password | default('aluno') }}"
+        PENGUINLAB_HOSTNAME: "{{ inventory_hostname }}"
       register: resultado
       changed_when: false
 

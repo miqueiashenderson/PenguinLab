@@ -13,6 +13,7 @@ set -euo pipefail
 LOGFILE="/var/log/penguinlab-provision.log"
 USUARIO="aluno"
 SENHA_ALUNO="${PENGUINLAB_PASSWORD:-aluno}"
+HOSTNAME_PENGUINLAB="${PENGUINLAB_HOSTNAME:-}"
 DNS_PRIMARIO="1.1.1.3"
 DNS_SECUNDARIO="1.0.0.3"
 HOMEPAGE="https://www.google.com.br"
@@ -351,6 +352,27 @@ setup_autologin() {
 }
 
 # ============================================================
+# HOSTNAME PADRAO (identificacao da maquina)
+# ============================================================
+setup_hostname() {
+    if [ -z "$HOSTNAME_PENGUINLAB" ]; then
+        aviso "PENGUINLAB_HOSTNAME nao definido — hostname atual mantido."
+        return 0
+    fi
+
+    log "--- Definindo hostname padrao: $HOSTNAME_PENGUINLAB ---"
+
+    # hostnamectl persiste o nome em /etc/hostname (sobrevive ao reboot)
+    hostnamectl set-hostname "$HOSTNAME_PENGUINLAB"
+
+    # /etc/hosts: remove a entrada antiga 127.0.1.1 e adiciona a nova
+    sed -i "/^127\.0\.1\.1[[:space:]]/d" /etc/hosts
+    echo "127.0.1.1 $HOSTNAME_PENGUINLAB" >> /etc/hosts
+
+    log "Hostname definido como $HOSTNAME_PENGUINLAB (persiste apos reboot)."
+}
+
+# ============================================================
 # RESUMO FINAL
 # ============================================================
 summary() {
@@ -384,6 +406,11 @@ summary() {
     log "4. Auto-login"
     log "   - Usuario $USUARIO entra automaticamente ao ligar a maquina"
     log ""
+    if [ -n "$HOSTNAME_PENGUINLAB" ]; then
+        log "5. Hostname padrao"
+        log "   - Maquina identificada como $HOSTNAME_PENGUINLAB"
+    fi
+    log ""
     log "Log completo: $LOGFILE"
     log ""
     log "IMPORTANTE: Reinicie a maquina para garantir que todas"
@@ -404,6 +431,7 @@ main() {
     check_root
     init_log
 
+    setup_hostname
     setup_dns
     setup_firefox
     setup_user

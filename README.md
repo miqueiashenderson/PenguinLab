@@ -22,6 +22,8 @@ PenguinLab/
 |   |-- inventory.ini         # Inventário com 14 máquinas de exemplo
 |   |-- bootstrap-ssh.sh      # Descobre máquinas na rede e prepara o SSH em lote
 |   |-- check-status.sh       # Verifica se as máquinas estão provisionadas
+|   |-- specs.yml             # Coleta as especificações (CPU, RAM, disco) de cada máquina
+|   |-- collect-specs.sh      # Executa o specs.yml e mostra a tabela formatada
 |   '-- ansible.cfg           # Configuração do Ansible (14 execuções em paralelo)
 |-- README.md                 # Este arquivo (visão geral)
 |-- IMPLANTACAO.md            # Guia prático passo a passo (com ou sem rede)
@@ -65,9 +67,14 @@ ansible-playbook -i inventory.ini playbook.yml \
 
 # 7. Verifique (após reiniciar as máquinas)
 ./check-status.sh
+
+# 8. (Opcional) Veja as especificações de cada máquina (CPU, RAM, disco, sistema)
+./collect-specs.sh
 ```
 
 > O playbook **não reinicia** as máquinas por padrão — reinicie manualmente depois (ou descomente a tarefa de reboot no fim do `playbook.yml`).
+>
+> O provisionamento também **padroniza o hostname** de cada máquina com o nome do inventário (`penguinlab-01`…`penguinlab-14`). Esse nome passa a aparecer na própria máquina — prompt do terminal, comando `hostname` e telas de login — facilitando identificar fisicamente qual equipamento é qual. Como o inventário mapeia nome ↔ IP, você diferencia as máquinas tanto pelo IP (remotamente) quanto pelo nome (na própria máquina); para o mapeamento nunca quebrar, configure **reserva de IP no DHCP** do roteador.
 
 ### Caminho B — sem rede (pendrive)
 

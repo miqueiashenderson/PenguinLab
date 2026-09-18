@@ -47,6 +47,8 @@ PenguinLab/
 |   |-- inventory.ini          # Inventário (14 máquinas de exemplo)
 |   |-- bootstrap-ssh.sh       # Descobre IPs e prepara o SSH em lote
 |   |-- check-status.sh        # Verifica o estado de provisão remotamente
+|   |-- specs.yml              # Coleta especificações (CPU/RAM/disco) por máquina
+|   |-- collect-specs.sh       # Executa o specs.yml e formata a saída em tabela
 |   '-- ansible.cfg            # forks=14, timeout, host_key_checking
 |-- README.md                  # Visão geral
 |-- IMPLANTACAO.md             # Guia prático (com e sem rede)
@@ -75,8 +77,9 @@ PenguinLab/
 | `setup_user()` | Cria o usuário `aluno` (idempotente), **aplica a senha em toda execução**, garante o shell bash, remove dos grupos `sudo`/`admin`/`wheel`, bloqueia sudo via `/etc/sudoers.d/penguinlab-aluno` (validado com `visudo`) e aplica regras polkit JS |
 | `setup_ssh_restriction()` | Escreve `/etc/ssh/sshd_config.d/90-penguinlab-no-ssh-aluno.conf` com `DenyUsers aluno`, valida com `sshd -t` e recarrega o serviço |
 | `setup_autologin()` | Configura o auto-login do `aluno` em `/etc/lightdm/lightdm.conf` (seção `[Seat:*]`) e adiciona o usuário ao grupo `autologin` (quando o grupo existe) |
+| `setup_hostname()` | Se `PENGUINLAB_HOSTNAME` estiver definido, define o hostname da máquina via `hostnamectl` e ajusta `/etc/hosts` (remove a entrada antiga `127.0.1.1` e adiciona a nova). Com valor vazio (padrão), mantém o hostname atual |
 | `summary()` | Imprime o resumo final do que foi aplicado |
-| `main()` | Orquestra: `check_root` -> `init_log` -> `setup_dns` -> `setup_firefox` -> `setup_user` -> `setup_ssh_restriction` -> `setup_autologin` -> `summary` |
+| `main()` | Orquestra: `check_root` -> `init_log` -> `setup_hostname` -> `setup_dns` -> `setup_firefox` -> `setup_user` -> `setup_ssh_restriction` -> `setup_autologin` -> `summary` |
 
 ### 4.3 Variáveis de configuração
 
@@ -85,6 +88,7 @@ PenguinLab/
 | `LOGFILE` | `/var/log/penguinlab-provision.log` | Caminho do log |
 | `USUARIO` | `aluno` | Nome do usuário limitado |
 | `SENHA_ALUNO` | `PENGUINLAB_PASSWORD` (ou `aluno`) | Senha do usuário limitado |
+| `HOSTNAME_PENGUINLAB` | `PENGUINLAB_HOSTNAME` (vazio) | Hostname padrão a aplicar; vazio = manter o atual |
 | `DNS_PRIMARIO` | `1.1.1.3` | Cloudflare for Families (primário) |
 | `DNS_SECUNDARIO` | `1.0.0.3` | Cloudflare for Families (secundário) |
 | `HOMEPAGE` | `https://www.google.com.br` | Homepage travada no Firefox |
@@ -102,6 +106,7 @@ PenguinLab/
 | `/etc/polkit-1/rules.d/90-penguinlab-restrict.rules` | Usuário |
 | `/etc/ssh/sshd_config.d/90-penguinlab-no-ssh-aluno.conf` | SSH |
 | `/etc/lightdm/lightdm.conf` | Auto-login |
+| `/etc/hostname` e `/etc/hosts` | Identificação (hostname padrão `penguinlab-XX`) |
 
 ---
 
@@ -112,17 +117,22 @@ PenguinLab/
 Quatro tarefas, todas com `become: true` (executam como root):
 
 1. **Copiar o script** -> `provision-penguinlab.sh` para `/tmp/` (modo 0755).
-2. **Executar** -> `/tmp/provision-penguinlab.sh` com `PENGUINLAB_PASSWORD` no ambiente da tarefa (padrão: `aluno`).
+2. **Executar** -> `/tmp/provision-penguinlab.sh` com `PENGUINLAB_PASSWORD` (senha do aluno) e `PENGUINLAB_HOSTNAME` (o **nome do host no inventário**, ex.: `penguinlab-05`) no ambiente da tarefa — o script define o hostname da máquina conforme esse valor.
 3. **Exibir resultado** -> imprime a saída do script no terminal do notebook (via `debug`).
 4. **Remover o temporário** -> apaga `/tmp/provision-penguinlab.sh`.
 
+Resultado: cada máquina fica identificada como `penguinlab-01`…`penguinlab-14` — o nome aparece na própria máquina (prompt do terminal, `hostname`, telas de login) e casa com o IP do inventário.
+
 A última tarefa (reiniciar as máquinas) está comentada por padrão — o reinício fica sob controle do administrador.
+
+> **Atenção ao mapeamento IP:** o hostname é derivado do nome do host no inventário — se o IP mudar (DHCP), o nome continua o mesmo, mas o IP que você usa para alcançá-lo muda. Configure **reserva DHCP** ou IP estático para o mapeamento nome ↔ IP permanecer correto.
 
 ### 5.2 `inventory.ini`
 
 - Grupo `[penguinlab]` com 14 hosts de exemplo (`penguinlab-01`…`penguinlab-14`, IPs `192.168.0.21`–`192.168.0.34`).
 - `[all:vars]` -> `ansible_user=professor` (a conta administrativa — **nunca** `aluno`).
 - Os IPs de exemplo devem ser substituídos pelos reais do laboratório.
+- Os nomes dos hosts NO inventário viram os hostnames das máquinas após o playbook (tarefa 5 acima) — revise os nomes antes de provisionar.
 
 ### 5.3 `ansible.cfg`
 
@@ -132,6 +142,16 @@ forks = 14            # provisão das 14 máquinas em paralelo
 host_key_checking = False
 timeout = 15
 ```
+
+### 5.4 `specs.yml`
+
+Playbook **somente leitura** (não altera nada nas máquinas) que coleta as especificações de todas as máquinas via *facts* do Ansible e escreve um CSV no notebook:
+
+- **Fonte dos dados:** facts automáticos (`ansible_distribution`, `ansible_processor`, `ansible_processor_cores/vcpus`, `ansible_memtotal_mb`) + `lsblk -d -b` somado para o disco total.
+- **Saída:** `/tmp/penguinlab-specs.csv` na máquina de controle, com uma linha por máquina: `nome;ip;hostname_real;sistema;cpu;nucleos;threads;ram_mb;disco_gb`.
+- **Uso:** `ansible-playbook -i inventory.ini specs.yml` ou, mais prático, `./collect-specs.sh` (seção 6.3).
+
+O CSV é gerado por um único template (`run_once: true` + `delegate_to: localhost`) sobre os hosts do lote — assim funciona também com `--limit` para uma máquina isolada.
 
 ---
 
@@ -162,6 +182,24 @@ Checagens por máquina:
 8. Bloqueio de SSH remoto do `aluno` presente.
 
 Saída com `[OK]`/`[FALHA]` por checagem e resumo final (`X/Y maquinas totalmente OK`).
+
+### 6.3 `collect-specs.sh`
+
+Wrapper do `specs.yml`: roda a coleta e formata o CSV em colunas alinhadas com `column -t -s ';'`. Uso:
+
+```bash
+./collect-specs.sh                          # todas as máquinas do inventário
+./collect-specs.sh --limit penguinlab-01    # uma máquina apenas
+```
+
+Saída exemplo:
+
+```
+nome           ip            hostname_real  sistema              cpu                        nucleos  threads  ram_mb  disco_gb
+penguinlab-01  192.168.0.21  penguinlab-01  LinuxMint 21.3       Intel(R) Core(TM) i3-...  2        4        7885    238.5
+```
+
+Útil para preencher a tabela de catalogação do laboratório (seção 3.3 do IMPLANTACAO.md) sem ir máquina por máquina.
 
 ---
 

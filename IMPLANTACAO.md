@@ -75,6 +75,8 @@ Monte uma tabela simples para organizar o laboratório:
 
 Os IPs podem ser obtidos pelo roteador (tabela de DHCP) ou pelo `--descobrir` do bootstrap (Caminho A).
 
+> **Boas notícias:** você não precisa preencher essa tabela à mão. No Caminho A, o playbook **padroniza o hostname** de cada máquina com o nome do inventário (`penguinlab-01`…) e o `./collect-specs.sh` puxa CPU, RAM e disco de todas automaticamente (seção 5.9). A tabela serve só para documentação/planejamento.
+
 ---
 
 ## 4. A rede do laboratório: como saber se o Caminho A vai funcionar
@@ -198,7 +200,7 @@ ansible-playbook -i inventory.ini playbook.yml --limit penguinlab-01 \
   -e "penguinlab_password=$PENGUINLAB_PASSWORD"
 ```
 
-O playbook copia o script para a máquina, executa como root (a saída colorida do script aparece no seu terminal) e remove o arquivo temporário. **Verifique a máquina de teste manualmente** (seção 7) antes de liberar o laboratório inteiro.
+O playbook copia o script para a máquina, executa como root (a saída colorida do script aparece no seu terminal), remove o arquivo temporário e **padroniza o hostname** da máquina para `penguinlab-01` (o nome do host no inventário) — confira depois com `hostname` ou no prompt do terminal. **Verifique a máquina de teste manualmente** (seção 7) antes de liberar o laboratório inteiro.
 
 ### 5.6 Aplicar em todas as máquinas
 
@@ -229,6 +231,18 @@ Ou descomente a tarefa de reboot no fim do `playbook.yml` (cuidado: reinicia tod
 
 Saída esperada: linhas `[OK]` verdes por checagem em cada máquina e, no final, `Resumo: 14/14 maquinas totalmente OK.` (ou use `./check-status.sh <ip>` para uma máquina isolada).
 
+### 5.9 Coletar as especificações (opcional)
+
+Preenche a tabela de catalogação da seção 3.3 **sem ir máquina por máquina**:
+
+```bash
+./collect-specs.sh
+```
+
+Mostra uma tabela com nome, IP, sistema, CPU, núcleos, RAM e disco de todas as máquinas (origem: facts do Ansible + `lsblk`). Também gera o CSV em `/tmp/penguinlab-specs.csv` no notebook, para guardar ou planilhar.
+
+> **Reserva de IP no DHCP (recomendado):** o inventário identifica cada máquina pelo IP. Se o roteador entregar IPs diferentes a cada boot, o mapeamento nome ↔ IP do inventário quebra. Configure **reserva DHCP** (ou IP estático) para cada `penguinlab-XX` no roteador — assim o `check-status.sh`, o `collect-specs.sh` e o Ansible sempre encontram a máquina certa.
+
 ---
 
 ## 6. Caminho B — provisionamento sem rede (pendrive)
@@ -258,6 +272,14 @@ sudo bash provision-penguinlab.sh
 > ```bash
 > sudo PENGUINLAB_PASSWORD='outra-senha' bash provision-penguinlab.sh
 > ```
+>
+> **Identificar a máquina (opcional):** para dar um nome à máquina (ex.: `penguinlab-05`), use a variável `PENGUINLAB_HOSTNAME` — o nome aparece no prompt, no `hostname` e nas telas de login. Sem ela, o hostname atual é mantido:
+>
+> ```bash
+> sudo PENGUINLAB_HOSTNAME=penguinlab-05 bash provision-penguinlab.sh
+> ```
+>
+> No Caminho A isso é automático: o playbook envia o nome do inventário para o script.
 
 **c)** Acompanhe a execução: linhas verdes `[+]` para cada etapa (DNS -> Firefox -> usuário -> SSH -> auto-login), amarelas `[!]` para avisos e vermelhas `[*]` para erros. No final, aparece o resumo "Provisionamento Concluído". O log completo fica em `/var/log/penguinlab-provision.log` na própria máquina.
 

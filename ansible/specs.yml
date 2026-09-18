@@ -1,0 +1,46 @@
+---
+# PenguinLab - Coleta de especificacoes das maquinas
+# Gera um CSV no notebook com CPU, RAM, disco, sistema e hostname de cada maquina.
+#
+# Uso (a partir da pasta ansible/):
+#   ansible-playbook -i inventory.ini specs.yml
+# Ou, com saida formatada em tabela:
+#   ./collect-specs.sh
+#
+# O CSV fica em /tmp/penguinlab-specs.csv na maquina de controle (notebook).
+
+- name: Coletar especificacoes das maquinas PenguinLab
+  hosts: penguinlab
+  gather_facts: true
+  vars:
+    arquivo_csv: "/tmp/penguinlab-specs.csv"
+
+  tasks:
+    - name: Extrair modelo da CPU
+      ansible.builtin.set_fact:
+        cpu_model: "{{ ansible_processor[0] if ansible_processor is sequence else ansible_processor }}"
+
+    - name: Obter tamanho dos discos em bytes
+      ansible.builtin.command: lsblk -d -b -o SIZE -n
+      register: discos_brutos
+      changed_when: false
+
+    - name: Calcular disco total em GB
+      ansible.builtin.set_fact:
+        disco_total_gb: "{{ ((discos_brutos.stdout_lines | map('int') | sum) / 1024 / 1024 / 1024) | round(1) }}"
+
+    - name: Escrever CSV com as especificacoes (no notebook)
+      ansible.builtin.copy:
+        content: |
+          nome;ip;hostname_real;sistema;cpu;nucleos;threads;ram_mb;disco_gb
+          {% for h in ansible_play_hosts if hostvars[h].cpu_model is defined -%}
+          {{ hostvars[h].inventory_hostname }};{{ hostvars[h].ansible_host }};{{ hostvars[h].ansible_hostname }};{{ hostvars[h].ansible_distribution }} {{ hostvars[h].ansible_distribution_version }};{{ hostvars[h].cpu_model }};{{ hostvars[h].ansible_processor_cores | default('n/a') }};{{ hostvars[h].ansible_processor_vcpus | default('n/a') }};{{ hostvars[h].ansible_memtotal_mb | default('n/a') }};{{ hostvars[h].disco_total_gb | default('n/a') }}
+          {% endfor %}
+        dest: "{{ arquivo_csv }}"
+      delegate_to: localhost
+      run_once: true
+
+    - name: Resumo
+      ansible.builtin.debug:
+        msg: "Especificacoes salvas em {{ arquivo_csv }} no notebook. Rode ./collect-specs.sh para ver na forma de tabela."
+      run_once: true
