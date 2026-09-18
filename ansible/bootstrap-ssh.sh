@@ -47,6 +47,19 @@ preparar_maquina() {
     echo ""
     log "=== Processando $host ==="
 
+    # 0. O sshd precisa estar ATIVO: o bootstrap usa SSH como transporte.
+    #    Em instalacao nova do Mint/Ubuntu o sshd vem DESATIVADO por padrao.
+    if ! timeout 2 bash -c "echo >/dev/tcp/${host}/22" 2>/dev/null; then
+        aviso "$host: porta 22 fechada — host inacessivel OU OpenSSH server nao ativo."
+        aviso "$host:   Em instalacao nova do Mint/Ubuntu o sshd vem desativado por padrao."
+        aviso "$host:   Ative-o manualmente nesta maquina (uma vez):"
+        aviso "$host:     sudo apt install -y openssh-server"
+        aviso "$host:     sudo systemctl enable --now ssh"
+        aviso "$host:   Depois rode este bootstrap novamente."
+        return 1
+    fi
+    log "$host: porta 22 aberta (sshd ativo)."
+
     # 1. Garantir openssh-server e python3 (python3 e exigido pelo Ansible)
     if ssh ${SSH_OPTS} "${USUARIO_ADMIN}@${host}" \
         "command -v sshd >/dev/null 2>&1 || sudo apt-get install -y openssh-server >/dev/null 2>&1; :"; then
@@ -110,6 +123,9 @@ descobrir_hosts() {
     if [ -s "$tmpfile" ]; then
         mapfile -t hosts < <(sort -t. -k4 -n "$tmpfile")
         for h in "${hosts[@]}"; do aviso "Encontrado: $h"; done
+        aviso "Nota: so aparecem hosts com a porta 22 aberta. Maquinas sem o"
+        aviso "OpenSSH server ativo nao aparecem — ative-o nelas com:"
+        aviso "  sudo apt install -y openssh-server && sudo systemctl enable --now ssh"
     fi
     rm -f "$tmpfile"
 
@@ -155,7 +171,7 @@ main() {
     log "Log: $LOG"
 
     for host in "${hosts[@]}"; do
-        preparar_maquina "$host"
+        preparar_maquina "$host" || aviso "Pulando $host (falha na preparacao)."
     done
 
     echo ""

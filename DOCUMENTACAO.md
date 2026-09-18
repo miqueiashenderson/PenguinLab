@@ -1,330 +1,291 @@
-# PenguinLab — Documentacao Completa
+# PenguinLab — Documentação Técnica
+
+Referência completa do projeto PenguinLab: decisões de arquitetura, funcionamento interno de cada script, modelo de segurança, problemas conhecidos e materiais de estudo. Para o passo a passo de implantação, consulte o **IMPLANTACAO.md**; para a visão geral, o **README.md**.
 
 ---
 
-## 1. Resumo do Projeto
+## 1. Visão geral
 
-PenguinLab e um sistema de provisionamento para laboratorios de informatica escolares (criancas). Nao e mais uma construcao de ISO customizada — e um **script de provisionamento** que roda em cima de uma instalacao padrao e nao modificada do Ubuntu ou Linux Mint.
-
-Aplicam-se tres camadas de restricao em cada maquina:
+O PenguinLab é um sistema de provisionamento para laboratórios de informática escolares. Ele aplica três camadas de restrição em cada máquina, sobre uma instalação padrão e não modificada do Linux Mint (ou Ubuntu):
 
 | Camada | O que faz |
 |---|---|
-| **DNS Filtrado** | Cloudflare for Families (1.1.1.3 / 1.0.0.3) via systemd-resolved com DNS-over-TLS |
-| **Firefox Restrito** | Politicas enterprise: extensoes bloqueadas, navegacao privada desabilitada, DNS-over-HTTPS travado, developer tools bloqueados |
-| **Usuario Sem Admin** | Usuario `aluno` com shell normal (bash) mas sem sudo, sem polkit admin, com restricoes deinstalacao de pacotes e gerenciamento de rede |
+| **DNS filtrado** | Cloudflare for Families (`1.1.1.3` / `1.0.0.3`) via `systemd-resolved`, com DNS-over-TLS (`opportunistic`) |
+| **Firefox restrito** | Políticas empresariais: extensões bloqueadas, navegação privada desabilitada, DNS-over-HTTPS travado, ferramentas de desenvolvedor bloqueadas, telemetria desativada |
+| **Usuário sem privilégios** | Usuário `aluno` com shell bash normal, mas sem sudo, sem ações administrativas via polkit, com login SSH remoto bloqueado e auto-login no LightDM |
 
 ---
 
-## 2. Decisoes de Arquitetura
+## 2. Decisões de arquitetura
 
-### Por que nao ISO customizada?
+### Por que não gerar uma ISO?
 
-A abordagem anterior (live-build + squashfs + GRUB/isolinux) era fragil demais — problemas com kernel panic no boot, autoremove removendo pacotes essenciais, complexidade desproporcional. Substituida por provisionamento em cima de um sistema ja instalado.
+A abordagem anterior (live-build + squashfs + GRUB/isolinux) era frágil demais: problemas com kernel panic no boot, pacotes essenciais removidos pelo `autoremove` e complexidade desproporcional ao escopo. A substituição por um script de provisionamento foi motivada por:
 
-### Por que provisionar e nao imagem?
+- **Simplicidade:** roda sobre uma instalação padrão, sem build customizado.
+- **Idempotência:** pode ser executado várias vezes sem duplicar configurações.
+- **Atualização fácil:** para mudar a configuração, basta rodar o script de novo.
+- **Escala:** o Ansible aplica o mesmo script em 14 máquinas em paralelo.
 
-- Facil de reexecutar (idempotente)
-- Facil de atualizar (rode o script de novo)
-- Nao depende de build complexo (squashfs, ISO)
-- Funciona sobre instalacoes padrao do Ubuntu/Mint
-- Ansible permite aplicar em 14 maquinas simultaneamente
+### Por que `DNSOverTLS=opportunistic` e não `yes`?
+
+`opportunistic` tenta usar DNS-over-TLS e, se a rede bloquear a porta 853 (alguns firewalls/proxies de escola), degrada para DNS comum em vez de quebrar a resolução. A filtragem de conteúdo continua valendo nos dois casos (ela é feita na camada de DNS, independente do TLS).
+
+### Por que polkit em formato JS?
+
+O Ubuntu 24.04+ não instala `polkitd-pkla` por padrão — arquivos `.pkla` são **silenciosamente ignorados**. O formato moderno de regras (`/etc/polkit-1/rules.d/*.rules`, JavaScript) é o suportado atualmente e é o que o script usa.
 
 ---
 
-## 3. Estrutura de Arquivos
+## 3. Estrutura de arquivos
 
 ```
 PenguinLab/
-├── provision-penguinlab.sh    # Script principal, idempotente, roda com sudo
-├── ansible/
-│   ├── playbook.yml           # Aplica o script via SSH nas maquinas
-│   ├── inventory.ini          # Inventario de exemplo (14 maquinas)
-│   ├── bootstrap-ssh.sh       # Descobre IPs + prepara SSH/openssh em lote
-│   ├── check-status.sh        # Verifica status de provisao remotamente
-│   └── ansible.cfg            # Paralelismo (forks=14) e timeout
-├── README.md                   # Guia de uso
-├── DOCUMENTACAO.md             # Este arquivo
-├── IMPLANTACAO.md              # Passo a passo pratico de implantacao
-├── .gitignore
-└── .opencodeignore
+|-- provision-penguinlab.sh    # Script principal (idempotente, roda como root)
+|-- ansible/
+|   |-- playbook.yml           # Aplica o script via SSH nas máquinas
+|   |-- inventory.ini          # Inventário (14 máquinas de exemplo)
+|   |-- bootstrap-ssh.sh       # Descobre IPs e prepara o SSH em lote
+|   |-- check-status.sh        # Verifica o estado de provisão remotamente
+|   '-- ansible.cfg            # forks=14, timeout, host_key_checking
+|-- README.md                  # Visão geral
+|-- IMPLANTACAO.md             # Guia prático (com e sem rede)
+'-- DOCUMENTACAO.md            # Este arquivo
 ```
 
-### Funcoes do provision-penguinlab.sh
+---
 
-| Funcao | Descricao |
+## 4. O `provision-penguinlab.sh` em detalhe
+
+### 4.1 Execução e pré-requisitos
+
+- Deve ser executado como **root** (`sudo bash provision-penguinlab.sh`); a função `check_root` aborta caso contrário.
+- Usa `set -euo pipefail`: qualquer erro interrompe a execução com mensagem clara.
+- Grava o log em `/var/log/penguinlab-provision.log` (append a cada execução).
+- É **idempotente** — reprovisionar não duplica configurações.
+
+### 4.2 Funções
+
+| Função | O que faz |
 |---|---|
-| `setup_dns()` | Configura Cloudflare for Families via systemd-resolved, DNS-over-TLS, impede NM de sobrescrever |
-| `setup_firefox()` | Escreve /etc/firefox/policies/policies.json com restricoes enterprise |
-| `setup_user()` | Cria/idempotente `aluno`, remove de sudo/admin, bloqueia sudo via sudoers.d, configura polkit JS rules |
-| `setup_ssh_restriction()` | Bloqueia login SSH remoto do `aluno` via `/etc/ssh/sshd_config.d/` |
-| `summary()` | Exibe resumo do que foi aplicado |
+| `check_root()` | Verifica se o script roda como root; aborta com instrução caso contrário |
+| `init_log()` | Cria o diretório e abre o log com um cabeçalho datado |
+| `setup_dns()` | Ativa o `systemd-resolved` (se necessário), escreve `/etc/systemd/resolved.conf` com os DNS filtrados e `DNSOverTLS=opportunistic` (fazendo backup do original em `resolved.conf.penguinlab.bak`), garante que `/etc/resolv.conf` aponte para o stub do systemd-resolved, e impede o NetworkManager de sobrescrever o DNS via `/etc/NetworkManager/conf.d/99-penguinlab-dns.conf` |
+| `setup_firefox()` | Verifica se o Firefox existe (e se é snap), e escreve `/etc/firefox/policies/policies.json` com todas as restrições |
+| `setup_user()` | Cria o usuário `aluno` (idempotente), **aplica a senha em toda execução**, garante o shell bash, remove dos grupos `sudo`/`admin`/`wheel`, bloqueia sudo via `/etc/sudoers.d/penguinlab-aluno` (validado com `visudo`) e aplica regras polkit JS |
+| `setup_ssh_restriction()` | Escreve `/etc/ssh/sshd_config.d/90-penguinlab-no-ssh-aluno.conf` com `DenyUsers aluno`, valida com `sshd -t` e recarrega o serviço |
+| `setup_autologin()` | Configura o auto-login do `aluno` em `/etc/lightdm/lightdm.conf` (seção `[Seat:*]`) e adiciona o usuário ao grupo `autologin` (quando o grupo existe) |
+| `summary()` | Imprime o resumo final do que foi aplicado |
+| `main()` | Orquestra: `check_root` -> `init_log` -> `setup_dns` -> `setup_firefox` -> `setup_user` -> `setup_ssh_restriction` -> `setup_autologin` -> `summary` |
 
-### Configuracao (variaveis no topo do script)
+### 4.3 Variáveis de configuração
 
-- `USUARIO="aluno"` — nome do usuario limitado
-- `SENHA_ALUNO` — overrideavel via `PENGUINLAB_PASSWORD=xxx`
-- `DNS_PRIMARIO="1.1.1.3"`, `DNS_SECUNDARIO="1.0.0.3"` — Cloudflare for Families
-- `HOMEPAGE="https://www.google.com.br"` — homepage travada no Firefox
+| Variável | Padrão | Descrição |
+|---|---|---|
+| `LOGFILE` | `/var/log/penguinlab-provision.log` | Caminho do log |
+| `USUARIO` | `aluno` | Nome do usuário limitado |
+| `SENHA_ALUNO` | `PENGUINLAB_PASSWORD` (ou `aluno`) | Senha do usuário limitado |
+| `DNS_PRIMARIO` | `1.1.1.3` | Cloudflare for Families (primário) |
+| `DNS_SECUNDARIO` | `1.0.0.3` | Cloudflare for Families (secundário) |
+| `HOMEPAGE` | `https://www.google.com.br` | Homepage travada no Firefox |
 
----
+**Aviso de senha padrão:** se `PENGUINLAB_PASSWORD` não for definida, o script usa `aluno` como senha e imprime um aviso bem visível — comportamento esperado neste projeto, que adota senha uniforme `aluno` para facilitar o uso pelas crianças (a conta não tem privilégios; ver seção 8).
 
-## 4. Fluxo de Uso
+### 4.4 Arquivos criados/alterados em cada máquina
 
-### Uso Manual (uma maquina)
-
-1. Copiar o script para a maquina alvo via SSH:
-   ```bash
-   scp provision-penguinlab.sh professor@192.168.0.21:/tmp/
-   ```
-2. Conectar e executar como root:
-   ```bash
-   ssh professor@192.168.0.21
-   sudo /tmp/provision-penguinlab.sh
-   ```
-3. Reiniciar a maquina:
-   ```bash
-   sudo reboot
-   ```
-
-### Uso via Ansible (14 maquinas)
-
-1. Instalar Ansible no notebook:
-   ```bash
-   sudo apt install ansible
-   ```
-2. Copiar chave SSH do notebook para cada maquina:
-   ```bash
-   ssh-copy-id professor@192.168.0.21
-   # repetir para cada uma
-   ```
-3. Editar `ansible/inventory.ini` com os IPs reais
-4. Testar em uma unica maquina:
-   ```bash
-   ansible-playbook -i ansible/inventory.ini ansible/playbook.yml --limit penguinlab-01
-   ```
-5. Rodar em todas:
-   ```bash
-   ansible-playbook -i ansible/inventory.ini ansible/playbook.yml
-   ```
-6. Reiniciar manualmente (o playbook nao reinicia por padrao).
-
-### Pre-requisitos para o Ansible funcionar
-
-- Chave SSH publica do notebook copiada para cada maquina (via `ssh-copy-id`)
-- Conta `professor` (ou o nome que usar) com sudo em cada maquina
-- Acesso a porta 22 de todas as maquinas pelo notebook
-- Ansible instalado no notebook
+| Arquivo | Camada |
+|---|---|
+| `/etc/systemd/resolved.conf` (+ `.penguinlab.bak`) | DNS |
+| `/etc/NetworkManager/conf.d/99-penguinlab-dns.conf` | DNS |
+| `/etc/firefox/policies/policies.json` | Firefox |
+| `/etc/sudoers.d/penguinlab-aluno` | Usuário |
+| `/etc/polkit-1/rules.d/90-penguinlab-restrict.rules` | Usuário |
+| `/etc/ssh/sshd_config.d/90-penguinlab-no-ssh-aluno.conf` | SSH |
+| `/etc/lightdm/lightdm.conf` | Auto-login |
 
 ---
 
-## 5. Precaucoes e Avisos
+## 5. Ansible
 
-### NUNCA usar `aluno` como conta do Ansible
+### 5.1 `playbook.yml`
 
-O provision-script bloqueia explicitamente sudo do `aluno` (`USUARIO ALL=(ALL) !ALL`). Se o Ansible se conectar como `aluno`, depois da primeira execucao vai travar com permission denied. Sempre use uma conta admin separada (`professor` ou similar) no `inventory.ini`.
+Quatro tarefas, todas com `become: true` (executam como root):
 
-### Firefox via Snap
+1. **Copiar o script** -> `provision-penguinlab.sh` para `/tmp/` (modo 0755).
+2. **Executar** -> `/tmp/provision-penguinlab.sh` com `PENGUINLAB_PASSWORD` no ambiente da tarefa (padrão: `aluno`).
+3. **Exibir resultado** -> imprime a saída do script no terminal do notebook (via `debug`).
+4. **Remover o temporário** -> apaga `/tmp/provision-penguinlab.sh`.
 
-No Ubuntu 24.04+, o Firefox vem via snap por padrao. Devido ao sandboxing do snap, o `policies.json` em `/etc/firefox/policies/` pode nao ser respeitado. O script detecta isso e avisa. Solucao recomendada:
-```bash
-sudo snap remove firefox
-sudo apt install firefox
-```
+A última tarefa (reiniciar as máquinas) está comentada por padrão — o reinício fica sob controle do administrador.
 
-### polkit
+### 5.2 `inventory.ini`
 
-O provision-script usa o formato moderno JS rules (`/etc/polkit-1/rules.d/`). Se `polkitd` nao estiver instalado, o script exibe um aviso e nao aplica as restricoes polkit (mas continua sem erro fatal).
+- Grupo `[penguinlab]` com 14 hosts de exemplo (`penguinlab-01`…`penguinlab-14`, IPs `192.168.0.21`–`192.168.0.34`).
+- `[all:vars]` -> `ansible_user=professor` (a conta administrativa — **nunca** `aluno`).
+- Os IPs de exemplo devem ser substituídos pelos reais do laboratório.
 
-### DNSOverTLS=opportunistic
+### 5.3 `ansible.cfg`
 
-Usado em vez de `yes` para evitar falhas de resolucao em redes que nao suportam DNS-over-TLS (firewall bloqueando porta 853). Tenta, nao falha se nao funcionar.
-
-### Limitação conhecida: bypass de DNS filtrado via outros navegadores/AppImages
-
-O filtro de DNS (Cloudflare for Families) + as políticas do Firefox **não** impedem que `aluno` baixe um AppImage de outro navegador com DNS-over-HTTPS embutido, contornando a filtragem no nível de rede. Mitigação completa exigiria um firewall bloqueando os endpoints/portas de DoH conhecidos — isso está **fora de escopo** deste projeto e permanece como limitação conhecida.
-
----
-
-## 6. Auto-Login e Dual Profile (aluno vs professor)
-
-### Objetivo
-
-Duas contas com comportamentos diferentes na tela de login (Slick Greeter + LightDM):
-
-- **`aluno`** — entra automaticamente, sem tela de login, sem senha, shell bash normal, sem privilegios administrativos
-- **`professor`** — login normal com senha, tem sudo, controle total
-
-### Configuracao do LightDM / Slick Greeter
-
-O Mint 22.x usa Slick Greeter como padrao. A configuracao de autologin vai em:
-
-```
-/etc/lightdm/lightdm.conf
-```
-
-Conteudo necesario para autologin do `aluno`:
 ```ini
-[Seat:*]
-autologin-user=aluno
-autologin-user-timeout=0
+[defaults]
+forks = 14            # provisão das 14 máquinas em paralelo
+host_key_checking = False
+timeout = 15
 ```
 
-O `professor` nao recebe autologin — aparece na tela de login normal e precisa de senha.
+---
 
-### Relacao com o provision-script
+## 6. Scripts auxiliares
 
-O `provision-penguinlab.sh` agora configura o auto-login automaticamente na funcao `setup_autologin()`, executada apos `setup_user()` (garante que o usuario `aluno` ja existe antes do LightDM tentar autologin). Ele:
-- Edita `/etc/lightdm/lightdm.conf` adicionando `autologin-user=aluno` e `autologin-user-timeout=0` na secao `[Seat:*]`, de forma idempotente.
-- Adiciona `aluno` ao grupo `autologin` (quando o grupo existe).
-- Ignora (`aviso`) se o LightDM nao estiver presente.
+### 6.1 `bootstrap-ssh.sh`
 
-### Como configurar manualmente (se necessario)
+Prepara as máquinas após a instalação manual do sistema. Executado no notebook (máquina de controle).
 
-1. Editar `/etc/lightdm/lightdm.conf`
-2. Adicionar `autologin-user=aluno` e `autologin-user-timeout=0` na secao `[Seat:*]`
-3. Reiniciar o LightDM: `sudo systemctl restart lightdm`
+- **Descoberta:** opção `--descobrir <faixa>` varre uma sub-rede `/24` testando a porta 22 via TCP (`echo >/dev/tcp/<ip>/22`), com até 50 conexões concorrentes. Alternativamente, os IPs podem ser passados diretamente como argumentos.
+- **Checagem de SSH:** antes de qualquer comando remoto, testa a porta 22 de cada host. Se fechada (comum em instalações novas, onde o `sshd` vem desativado), imprime a orientação completa (`sudo apt install -y openssh-server && sudo systemctl enable --now ssh`), **pula a máquina e continua o lote**.
+- **Preparação:** garante `openssh-server` e `python3` (esforço máximo, sem falha fatal), copia a chave pública do notebook para a conta `professor` (via `ssh-copy-id`) e valida o login sem senha.
+- **Chave:** gera automaticamente `~/.ssh/id_ed25519` se ainda não existir.
+- **Configuração:** `USUARIO_ADMIN` (padrão `professor`, via `PENGUINLAB_ADMIN`), log em `bootstrap-ssh.log`.
 
-**Importante**: se o `aluno` nao existir no sistema, o LightDM vai falhar ao tentar autologin. Por isso o autologin do `aluno` deve ser configurado apos o `aluno` ser criado (o provision-script ja faz isso na ordem correta).
+### 6.2 `check-status.sh`
+
+Verifica remotamente se cada máquina está provisionada. Usa o `inventory.ini` (extraindo `ansible_host`) ou IPs passados como argumentos.
+
+Checagens por máquina:
+1. Conexão SSH e existência do usuário `aluno`.
+2. `aluno` fora dos grupos `sudo`/`admin`/`wheel`.
+3. Sudo bloqueado para `aluno` (procura "not allowed"/`!ALL`).
+4. DNS filtrado presente em `/etc/systemd/resolved.conf`.
+5. `policies.json` do Firefox presente.
+6. Regras polkit presentes.
+7. Auto-login do `aluno` configurado no LightDM.
+8. Bloqueio de SSH remoto do `aluno` presente.
+
+Saída com `[OK]`/`[FALHA]` por checagem e resumo final (`X/Y maquinas totalmente OK`).
 
 ---
 
-## 7. Problemas Encontrados e Corrigidos
+## 7. Modelo de segurança
 
-| Problema | Severidade | O que acontecia | Correcao |
-|---|---|---|---|
-| Self-lockout Ansible | Critico | `ansible_user=aluno` + `!ALL` no sudo = Ansible trava apos primeira execucao | Mudar para `ansible_user=professor` |
-| polkit .pkla ignorado | Critico | Ubuntu 24.04 nao tem `polkitd-pkla` instalado por padrao — arquivo `.pkla` eh silenciosamente ignorado | Trocar para JS rules em `/etc/polkit-1/rules.d/` |
-| Chaves JSON duplicadas | Moderado | `DisableSystemAddonUpdate`, `DisableTelemetry` etc. duplicados no policies.json | Reorganizar e remover duplicatas |
-| Log sobrescrito | Menor | `init_log()` usava `>` (sobrescreve) | Trocado para `>>` (append) |
-| Chave SSH sobrescrita a cada bootstrap | Critico | `ssh-keygen` respondia "y" ao prompt de overwrite, invalidando acesso ja configurado | So gerar chave se ainda nao existir |
-| Checagem de grupos admin nunca rodava | Alto | Condicao externa no check-status.sh nunca era verdadeira, checagem #3 nunca era exibida | Removido `if` externo morto |
-| Doc de autologin desatualizada | Moderado | DOCUMENTACAO.md citava slick-greeter.conf, script usa lightdm.conf | Doc corrigida para bater com o codigo |
-| Login SSH remoto do aluno nao bloqueado | Alto (seguranca) | Usuario aluno podia autenticar via SSH remotamente | Nova funcao setup_ssh_restriction() com DenyUsers |
-| Senha padrao previsivel | Moderado (seguranca) | Todas as maquinas usavam "aluno"/"aluno" se PENGUINLAB_PASSWORD nao definida | Aviso visivel + doc exigindo senha forte em producao |
-| resolved.conf sobrescrito sem backup | Baixo | Configuracoes DNS originais eram perdidas permanentemente | Backup automatico antes de sobrescrever |
-| Deteccao de polkit falha (dpkg -l) | Baixo | dpkg -l retornava 0 mesmo com pacote removido, mascarando ausencia do polkit | Trocado para dpkg -s com checagem de status |
+### O que o `aluno` pode fazer
 
----
+- Usar o desktop normalmente (navegador restrito, aplicativos comuns, terminal **livre** — o shell não é restrito).
+- Salvar arquivos na própria home (`/home/aluno`).
 
-## 8. Problemas Conhecidos do Projeto Original (antes da refatoracao)
+### O que o `aluno` não pode fazer
 
-Alem dos 4 acima, o projeto original tinha:
-
-| Problema | Arquivo |
+| Ação | Mecanismo de bloqueio |
 |---|---|
-| build.sh — script de build ISO mista (Mint live-build) | `build.sh` |
-| buildiso.sh — script alternativo de build ISO | `buildiso.sh` |
-| build-docker.log — log de build Docker abandoned | `build-docker.log` |
-| Veyon, e2guardian, AppArmor — fora de escopo | `config/includes.chroot/`, etc. |
-| restricoes.sh — bloqueio de comandos no terminal do aluno | `config/includes.chroot/etc/profile.d/restricoes.sh` |
-| Config de DNS no resolved.conf nao usava DNSOverTLS | `config/includes.chroot/etc/systemd/resolved.conf` |
-| policies.json do Firefox incompleto (nao bloqueava DNS-over-HTTPS, nao tinha ExtensionSettings correta) | `config/includes.chroot/etc/firefox/policies/policies.json` |
-| install-penguinlab.sh usava `useradd -G sudo` pro aluno (contradizia bloqueio de admin) | `scripts/install-penguinlab.sh` |
+| `sudo` / virar root | `/etc/sudoers.d/penguinlab-aluno` (`aluno ALL=(ALL) !ALL`) |
+| Instalar pacotes | Regra polkit (prefixo `org.freedesktop.packagekit.`) |
+| Alterar rede/Wi-Fi | Regra polkit (prefixo `org.freedesktop.NetworkManager.`) |
+| Montar discos/pendrives | Regra polkit (prefixo `org.freedesktop.udisks2.`) |
+| Gerenciar serviços systemd | Regra polkit (prefixo `org.freedesktop.systemd1.`) |
+| Login SSH remoto | `DenyUsers aluno` no sshd |
+
+### A conta `professor`
+
+Não é alterada pelo provisionamento (apenas perde o auto-login, se existisse). Mantém sudo e acesso total. É a conta usada pelo Ansible — por isso a senha dela deve ser forte e **nunca** igual à do `aluno`.
+
+### Auto-login
+
+O `aluno` entra automaticamente ao ligar a máquina. Como consequência, a senha do `aluno` só é usada no desbloqueio de tela (se o bloqueio estiver ativado) e em logouts manuais.
 
 ---
 
-## 9. Roadmap Futuro (Nao Implementado Ainda)
+## 8. Política de senhas (decisões registradas)
 
-- [x] Auto-login do `aluno` no Slick Greeter (implementado no provision-script)
-- [x] Script `bootstrap-ssh.sh` (descobre IPs + copia chave SSH em lote)
-- [x] Secao pos-deploy / checklist de verificacao no README
-- [x] Rollback plan documentado
-- [x] Script `check-status.sh` para verificar status de provisao
-- [x] `ansible.cfg` com `forks = 14` para paralelismo total
+| Conta | Senha | Justificativa |
+|---|---|---|
+| `aluno` | `aluno`, uniforme em todas as máquinas | Facilidade para crianças digitarem no desbloqueio de tela. Risco aceitável: a conta é totalmente sem privilégios, sem SSH remoto, e o DNS/navegador continuam filtrados |
+| `professor` | Forte, igual em todas as máquinas | É a conta com sudo; uma única senha forte é mais simples de gerenciar. Deve ser guardada com cuidado |
+
+- A senha do `aluno` é aplicada em **toda** execução do script (não só na criação do usuário), portanto reprovisionar com outro valor a atualiza.
+- O `PENGUINLAB_PASSWORD` precisa ser passado ao script via ambiente; no Ansible, o playbook o propaga via `environment:`; no pendrive, deve ser passado junto do `sudo` (`sudo PENGUINLAB_PASSWORD='...' bash ...`), pois o `sudo` limpa variáveis de ambiente por padrão.
 
 ---
 
-## 10. Referencias de Estudo
+## 9. Rede: cenários e implicações técnicas
+
+- **Mesmo roteador (wifi e cabo na mesma sub-rede):** o notebook no wifi alcança as máquinas cabeadas normalmente; o `--descobrir` e o Ansible funcionam sem ajustes.
+- **Sub-redes separadas (ou VLANs com firewall):** o notebook não alcança as máquinas — nem o `--descobrir` (ele varre uma única faixa `/24`), nem o SSH. Soluções: plugar o notebook no cabo, usar um travel router em modo bridge, ou adotar o provisionamento por pendrive.
+- **Porta 853 (DNS-over-TLS):** se a rede da escola bloquear a porta 853, o DNS muda (via `opportunistic`) para DNS comum — a filtragem de conteúdo continua, pois é feita na camada de resolução.
+- **AP isolation / guest networks:** em redes com isolamento de cliente, mesmo na mesma faixa o tráfego entre dispositivos pode ser bloqueado; nesse caso, o notebook deve entrar na rede via cabo/travel router.
+
+---
+
+## 10. Problemas encontrados e corrigidos
+
+| Problema | Severidade | O que acontecia | Correção |
+|---|---|---|---|
+| Self-lockout no Ansible | Crítico | `ansible_user=aluno` + `!ALL` no sudo travava o Ansible após a primeira execução | Documentar `ansible_user=professor` como obrigatório |
+| `polkit` `.pkla` ignorado | Crítico | Ubuntu 24.04 não tem `polkitd-pkla`; regras `.pkla` eram ignoradas silenciosamente | Migrar para regras JS em `/etc/polkit-1/rules.d/` |
+| Chaves JSON duplicadas | Moderado | `DisableSystemAddonUpdate`, `DisableTelemetry` etc. duplicados no `policies.json` | Reorganizar e remover duplicatas |
+| Log sobrescrito | Menor | `init_log()` usava `>` (sobrescrevia) | Trocar para `>>` (append) |
+| Chave SSH sobrescrita no bootstrap | Crítico | `ssh-keygen` respondia "y" ao prompt de sobrescrita, invalidando acessos existentes | Gerar chave apenas se ainda não existir |
+| Checagem de grupos admin nunca rodava | Alto | Condição externa morta no `check-status.sh` | Remover o `if` externo |
+| Doc de autologin desatualizada | Moderado | Doc citava `slick-greeter.conf`; script usa `lightdm.conf` | Alinhar documentação ao código |
+| SSH remoto do `aluno` liberado | Alto (segurança) | `aluno` podia autenticar via SSH remotamente | Nova função `setup_ssh_restriction()` com `DenyUsers` |
+| Senha padrão previsível | Moderado (segurança) | Todas usavam `aluno`/`aluno` se `PENGUINLAB_PASSWORD` não definida | Aviso visível + documentação exigindo senha adequada em produção |
+| `resolved.conf` sobrescrito sem backup | Baixo | Configuração DNS original perdida permanentemente | Backup automático antes de sobrescrever |
+| Detecção de polkit falha (`dpkg -l`) | Baixo | `dpkg -l` retornava 0 mesmo com pacote removido | Trocar para `dpkg -s` com checagem de status |
+| Senha do `aluno` não atualizada em re-execução | Moderado | `chpasswd` rodava apenas na criação do usuário | Aplicar `chpasswd` em toda execução do `setup_user` |
+| Bootstrap cego quando `sshd` inativo | Alto (fluxo) | Instalação nova não ativa `sshd`; bootstrap falhava de forma genérica ou nem achava a máquina | Checar a porta 22 com orientação explícita (`apt`/`systemctl`) e pular a máquina |
+
+---
+
+## 11. Limitações conhecidas
+
+- **Bypass de DNS via outros navegadores/AppImages:** o filtro de DNS e as políticas do Firefox **não** impedem que o `aluno` baixe um AppImage de outro navegador com DNS-over-HTTPS embutido, contornando a filtragem na camada de rede. A mitigação completa (firewall bloqueando endpoints/portas de DoH conhecidos) está **fora do escopo**.
+- **Firefox via snap (Ubuntu 24.04+):** o sandboxing do snap pode fazer com que o `policies.json` em `/etc/firefox/policies/` seja ignorado. O script detecta e avisa. Solução: trocar para o `.deb` (`sudo snap remove firefox && sudo apt install firefox`) — o Linux Mint já vem com o Firefox `.deb`, por isso é a distribuição recomendada.
+- **Sem reset de sessão:** não há limpeza automática de `/home/aluno` ao religar — os arquivos do aluno persistem.
+- **polkit ausente:** se `polkitd` não estiver instalado, o script avisa e segue (as restrições polkit não são aplicadas nessa máquina, sem erro fatal).
+- **Shell do aluno é livre:** o provisionamento não restringe o terminal. Para crianças muito pequenas, uma limitação adicional seria uma evolução futura.
+
+---
+
+## 12. Verificação e diagnóstico
+
+- **Em lote (com rede):** `ansible/check-status.sh` — 8 checagens por máquina com resumo final.
+- **Manual:** tabela da seção 7 do **IMPLANTACAO.md** (DNS, Firefox, sudo, SSH, polkit, auto-login).
+- **Logs:** `/var/log/penguinlab-provision.log` em cada máquina; `bootstrap-ssh.log` no notebook.
+- **Problema comum:** máquina não aparece no `--descobrir` -> quase sempre é o `sshd` desativado (execute o passo 3.2 do IMPLANTACAO e rode o bootstrap de novo).
+
+---
+
+## 13. Referências de estudo
 
 ### Linux / Systemd
-
-- **systemd-resolved** — https://www.freedesktop.org/software/systemd/man/systemd-resolved.html
-- **NetworkManager + systemd-resolved** — https://developer.gnome.org/NetworkManager/stable/nm-dns.html
-- **Samba Krb5 / Kerberos + DNS** — https://web.mit.edu/kerberos/krb5-latest/doc/admin/conf_files.html
+- systemd-resolved — https://www.freedesktop.org/software/systemd/man/systemd-resolved.html
+- NetworkManager + systemd-resolved — https://developer.gnome.org/NetworkManager/stable/nm-dns.html
 
 ### Shell Scripting (Bash)
+- Advanced Bash-Scripting Guide — https://tldp.org/LDP/abs/html/
+- Bash Reference Manual — https://www.gnu.org/software/bash/manual/bash.html
 
-- **Advanced Bash-Scripting Guide** — https://tldp.org/LDP/abs/html/ (gratis, completo)
-- **Bash Guide for Beginners** — https://tldp.org/LDP/Bash-Beginners-Guide/html/ (gratis)
-- **Bash Reference Manual** — https://www.gnu.org/software/bash/manual/bash.html (oficial)
-
-### Politicas Firefox Enterprise
-
-- **Enterprise Policy documentation** — https://mozilla-policy.readthedocs.io/en/latest/
-- **policies.json reference** — https://mozilla-policy.readthedocs.io/en/latest/policies_json/
+### Políticas Firefox Enterprise
+- Enterprise Policy documentation — https://mozilla-policy.readthedocs.io/en/latest/
+- policies.json reference — https://mozilla-policy.readthedocs.io/en/latest/policies_json/
 
 ### polkit (PolicyKit)
-
-- **polkit documentation** — https://www.freedesktop.org/wiki/Software/polkit/
-- **polkit rules (JS format)** — https://www.freedesktop.org/software/polkit/docs/latest/polkit.8.html
-- **pam_pkcs11 / polkit local authority** — https://www.freedesktop.org/wiki/Software/polkit/
+- polkit documentation — https://www.freedesktop.org/wiki/Software/polkit/
+- polkit rules (formato JS) — https://www.freedesktop.org/software/polkit/docs/latest/polkit.8.html
 
 ### Ansible
-
-- **Ansible Documentation** — https://docs.ansible.com/ansible/latest/index.html
-- **Ansible Playbook Guide** — https://docs.ansible.com/ansible/latest/playbook_guide/playbooks_intro.html
-- **Ansible Inventory** — https://docs.ansible.com/ansible/latest/inventory_guide/index.html
-- **Ansible become / privilege escalation** — https://docs.ansible.com/ansible/latest/playbook_guide/playbooks_privilege_escalation.html
+- Documentação oficial — https://docs.ansible.com/ansible/latest/index.html
+- Playbooks — https://docs.ansible.com/ansible/latest/playbook_guide/playbooks_intro.html
+- Inventário — https://docs.ansible.com/ansible/latest/inventory_guide/index.html
+- Escalação de privilégios (become) — https://docs.ansible.com/ansible/latest/playbook_guide/playbooks_privilege_escalation.html
 
 ### Linux Mint / LightDM / Slick Greeter
-
-- **LightDM documentation** — https://wiki.lightdm.org/
-- **Slick Greeter configuration** — https://github.com/linuxmint/slick-greeter
-- **Linux Mint Debian Edition (LMDE) install guide** — https://linuxmint.com/documentation.php
+- LightDM — https://wiki.lightdm.org/
+- Slick Greeter — https://github.com/linuxmint/slick-greeter
 
 ### Redes e DNS
-
-- **Cloudflare for Families** — https://developers.cloudflare.com/1.1.1.1/
-- **DNS-over-HTTPS (DoH)** — https://developers.cloudflare.com/1.1.1.1/dns-over-https/
-- **DNS-over-TLS (DoT)** — https://developers.cloudflare.com/1.1.1.1/dns-over-tls/
-- **RFC 8484 — DNS Queries over HTTPS** — https://datatracker.ietf.org/doc/html/rfc8484
-
-### Livros Recomendados
-
-| Livro | Foco | Nivel |
-|---|---|---|
-| *Linux Bible* (Christopher Negus) — Wiley | Linux geral, sysadmin, systemd | Iniciante-Intermediario |
-| *UNIX and Linux System Administration Handbook* (Nemeth et al.) — Pearson | Sysadmin completo, redes, users, PAM | Intermediario-Avancado |
-| *Linux Network Administrator's Guide* (O'Reilly) | Redes Linux, DNS, firewall | Intermediario |
-| *Ansible: Up & Running* (Lorin Hochstein & René Moser) — O'Reilly | Ansible do básico ao provisionamento | Iniciante-Intermediario |
-| *Testing with Ansible* (René Moser) | Testes e validação em Ansible | Intermediario |
-| *The Linux Command Line* (William Shotts) — NoStarch.com | CLI, bash, fundamentos | Iniciante |
-
-### Sites / Blogs
-
-- https://www.howtogeek.com — Artigos práticos sobre Linux e redes
-- https://www.digitalocean.com/community/tutorials — Tutoriais de sysadmin e Ansible
-- https://ubuntu.com/server/docs — Documentação oficial do Ubuntu
-- https://doc.ubuntu-br.org/ — Documentação Ubuntu em português
+- Cloudflare for Families — https://developers.cloudflare.com/1.1.1.1/
+- DNS-over-TLS — https://developers.cloudflare.com/1.1.1.1/dns-over-tls/
+- RFC 8484 — DNS Queries over HTTPS — https://datatracker.ietf.org/doc/html/rfc8484
 
 ---
 
-## 11. Fluxo Completo de Implantação (Resumo Visual)
-
-```
-No notebook:
-  1. Copiar repo PenguinLab para notebook
-  2. Editar ansible/inventory.ini com IPs reais
-  3. Testar: ansible-playbook --limit penguinlab-01
-  4. Executar: ansible-playbook (todas as 14)
-
-Nas 14 maquinas (cada uma):
-  Antes do provision:
-    - Linux Mint instalado (instalacao padrao)
-    - Usuario 'professor' criado (admin/sudo)
-    - OpenSSH server instalado e ativo
-    - Chave SSH do notebook copiada para 'professor'
-    - Senha de 'professor' configurada ou chave auth
-
-  Apos o provision:
-    - DNS filtrado ativo (Cloudflare for Families)
-    - Firefox com policies restritivas
-    - Usuario 'aluno' criado (sem sudo, sem admin)
-    - Auto-login do 'aluno' (configurar no lightdm.conf)
-    - Reiniciar a maquina
-```
-
----
-
-*Documentacao gerada como parte da refatoracao do PenguinLab. Toda decisao de design, problema encontrado e correcao aplicada esta registrada aqui.*
+*Documentação técnica do PenguinLab. Toda decisão de design, problema encontrado e correção aplicada está registrada neste arquivo.*

@@ -224,9 +224,13 @@ setup_user() {
         log "Usuario $USUARIO ja existe."
     else
         useradd -m -s /bin/bash "$USUARIO"
-        echo "$USUARIO:$SENHA_ALUNO" | chpasswd
         log "Usuario $USUARIO criado com sucesso."
     fi
+
+    # Aplicar/atualizar a senha em TODA execucao (nao so na criacao):
+    # re-execucoes com PENGUINLAB_PASSWORD diferente atualizam a senha.
+    echo "$USUARIO:$SENHA_ALUNO" | chpasswd
+    log "Senha do usuario $USUARIO aplicada/atualizada."
 
     # Garantir que o shell e bash (pode ter sido alterado)
     usermod -s /bin/bash "$USUARIO"

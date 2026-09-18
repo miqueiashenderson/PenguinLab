@@ -1,163 +1,122 @@
 # PenguinLab
 
-Sistema de provisionamento para laboratorios de informatica escolares (criancas), com foco em seguranca e controle de acesso.
+O PenguinLab é um sistema de provisionamento para laboratórios de informática escolares (voltado a crianças), com foco em segurança e controle de acesso. Ele transforma uma instalação padrão de Linux Mint (ou Ubuntu) em uma máquina segura para uso por alunos, aplicando três camadas de configuração:
 
-## O que faz
-
-O PenguinLab aplica tres configuracoes essenciais em maqinas Ubuntu/Mint:
-
-| Configuracao | O que faz |
+| Camada | O que faz |
 |---|---|
-| **DNS Filtrado** | Usa Cloudflare for Families (`1.1.1.3` / `1.0.0.3`) via `systemd-resolved` com DNS-over-TLS para bloquear malware e conteudo adulto na camada de DNS. |
-| **Firefox Restrito** | Aplica politicas enterprise que bloqueiam extensoes, navegacao privada, `about:config`, developer tools, e desabilita DNS-over-HTTPS (para que o Firefox use o DNS filtrado do sistema). |
-| **Usuario sem admin** | Cria o usuario `aluno` com shell normal (bash) mas sem privilegios administrativos — sem `sudo`, sem montagem de discos, sem instalacao de pacotes, sem gerenciamento de servicos. |
+| **DNS filtrado** | Usa Cloudflare for Families (`1.1.1.3` / `1.0.0.3`) via `systemd-resolved`, com DNS-over-TLS, bloqueando malware e conteúdo adulto na camada de rede — vale para qualquer navegador ou aplicativo |
+| **Firefox restrito** | Aplica políticas empresariais que bloqueiam extensões, navegação privada, `about:config`, ferramentas de desenvolvedor e telemetria, e desabilita o DNS-over-HTTPS do navegador (para que ele use o DNS filtrado do sistema) |
+| **Usuário sem privilégios** | Cria o usuário `aluno`, com shell bash normal, mas sem sudo, sem instalar pacotes, sem gerenciar rede, discos ou serviços, e sem login SSH remoto |
 
-## Por que "provisionar" e nao "gerar ISO"?
+## Por que provisionar em vez de gerar uma ISO?
 
-O projeto anterior tentava gerar uma ISO customizada com live-build. A abordagem se mostrou fragil demais — problemas com squashfs, kernel panic no boot, e complexidade desproporcional ao escopo. A decisao foi abandonar a construcao de ISO e usar um **script de provisionamento** que roda em cima de uma instalacao padrao e nao modificada do Ubuntu ou Linux Mint. Isso simplifica drasticamente a manutencao e elimina problemas de boot.
+O projeto anterior tentava gerar uma ISO personalizada com live-build. A abordagem se mostrou frágil: problemas com squashfs, kernel panic no boot e complexidade desproporcional ao escopo. A decisão foi abandonar a construção de ISO e usar um **script de provisionamento idempotente** sobre uma instalação padrão e não modificada do sistema. Isso simplifica a manutenção — para atualizar uma máquina, basta executar o script novamente.
 
-## Estrutura do repositorio
+## Estrutura do repositório
 
 ```
 PenguinLab/
-├── provision-penguinlab.sh    # script principal, idempotente, roda com sudo
-├── ansible/
-│   ├── playbook.yml           # aplica o script via SSH nas maquinas do lab
-│   └── inventory.ini          # inventario com 14 maquinas de exemplo
-├── README.md
-└── .gitignore
+|-- provision-penguinlab.sh   # Script principal (idempotente, roda como root)
+|-- ansible/
+|   |-- playbook.yml          # Aplica o script via SSH em várias máquinas
+|   |-- inventory.ini         # Inventário com 14 máquinas de exemplo
+|   |-- bootstrap-ssh.sh      # Descobre máquinas na rede e prepara o SSH em lote
+|   |-- check-status.sh       # Verifica se as máquinas estão provisionadas
+|   '-- ansible.cfg           # Configuração do Ansible (14 execuções em paralelo)
+|-- README.md                 # Este arquivo (visão geral)
+|-- IMPLANTACAO.md            # Guia prático passo a passo (com ou sem rede)
+'-- DOCUMENTACAO.md           # Referência técnica completa
 ```
 
-## Uso manual (uma maquina)
+## Como funciona, na prática
 
-1. Copie o script para a maquina alvo (usando a conta admin, nao `aluno`):
-   ```bash
-   scp provision-penguinlab.sh professor@192.168.0.21:/tmp/
-   ```
+1. **Instale o Linux Mint** em cada máquina do laboratório (instalação padrão) e crie a conta administrativa **`professor`**.
+2. **Ative o OpenSSH server** em cada máquina (ele não vem ativo por padrão).
+3. Escolha um dos dois caminhos de aplicação:
 
-2. Conecte-se via SSH e execute como root:
-   ```bash
-   ssh professor@192.168.0.21
-   sudo /tmp/provision-penguinlab.sh
-   ```
+- **Com rede (Ansible)** — recomendado quando o notebook e as máquinas estão na mesma rede: provisiona as 14 em paralelo, em poucos minutos.
+- **Sem rede (pendrive)** — funciona de qualquer forma: copie o script para um pendrive e execute manualmente em cada máquina.
 
-3. Reinicie a maquina para garantir que todas as configuracoes tenham efeito:
-   ```bash
-   sudo reboot
-   ```
+O passo a passo completo dos dois caminhos está no **IMPLANTACAO.md**. Abaixo, um resumo de cada um.
 
-O script e idempotente — pode ser executado varias vezes sem duplicar configuracoes.
+### Caminho A — com rede (Ansible)
 
-## Conta de administracao (critico)
+Na máquina de controle (notebook do professor), dentro da pasta `ansible/`:
 
-**NUNCA** use o usuario `aluno` para executar o script ou conectar via Ansible. O proprio script bloqueia sudo desse usuario — se voce usar `aluno` como `ansible_user`, o Ansible vai travar apos a primeira execucao (falta de permissao para `become`).
-
-Use sempre a conta admin criada durante a instalacao do Ubuntu/Mint (ex: `professor`, `admin`, ou o primeiro usuario que voce criou quando instalou o sistema). Configure-a no `ansible/inventory.ini`:
-
-```ini
-[all:vars]
-ansible_user=professor
-```
-
-## Uso via Ansible (14 maquinas)
-
-### Pre-requisitos
-
-1. Instale o Ansible na maquina de controle (professor):
-   ```bash
-   sudo apt install ansible
-   ```
-
-2. Configure o acesso SSH por chave publica em cada maquina do laboratorio:
-   ```bash
-   # Para cada maquina (exemplo com penguinlab-01):
-   ssh-copy-id professor@192.168.0.21
-   ```
-
-3. Edite `ansible/inventory.ini` com os IPs reais das maquinas.
-
-### Execucao
-
-**Teste em uma unica maquina primeiro:**
 ```bash
-cd ansible/
-export PENGUINLAB_PASSWORD='senha-forte-aqui'
-ansible-playbook -i inventory.ini playbook.yml --limit penguinlab-01 -e "penguinlab_password=$PENGUINLAB_PASSWORD"
+# 1. Instale o Ansible (uma vez)
+sudo apt install ansible
+
+# 2. Descubra as máquinas e prepare o SSH (pede a senha do professor uma vez por máquina)
+./bootstrap-ssh.sh --descobrir 192.168.0        # troque pela faixa da sua rede
+
+# 3. Edite ansible/inventory.ini com os IPs reais encontrados
+
+# 4. Defina a senha do usuário aluno (o padrão é "aluno"; use outra se preferir)
+export PENGUINLAB_PASSWORD='aluno'
+
+# 5. Teste em uma única máquina
+ansible-playbook -i inventory.ini playbook.yml --limit penguinlab-01 \
+  -e "penguinlab_password=$PENGUINLAB_PASSWORD"
+
+# 6. Aplique em todas as máquinas
+ansible-playbook -i inventory.ini playbook.yml \
+  -e "penguinlab_password=$PENGUINLAB_PASSWORD"
+
+# 7. Verifique (após reiniciar as máquinas)
+./check-status.sh
 ```
 
-**Executar em todas as 14 maquinas:**
+> O playbook **não reinicia** as máquinas por padrão — reinicie manualmente depois (ou descomente a tarefa de reboot no fim do `playbook.yml`).
+
+### Caminho B — sem rede (pendrive)
+
+1. Copie `provision-penguinlab.sh` para a raiz de um pendrive.
+2. Em cada máquina, logue como `professor`, monte o pendrive e execute:
+
 ```bash
-cd ansible/
-export PENGUINLAB_PASSWORD='senha-forte-aqui'
-ansible-playbook -i inventory.ini playbook.yml -e "penguinlab_password=$PENGUINLAB_PASSWORD"
+cd /media/professor/<NOME_DO_PENDRIVE>/
+sudo bash provision-penguinlab.sh
 ```
 
-> **IMPORTANTE (segurança):** por padrão a senha do usuário `aluno` é a fraca e previsível `aluno` (`PENGUINLAB_PASSWORD` não definida). Em produção, **defina sempre** `PENGUINLAB_PASSWORD` com uma senha forte antes de rodar. O playbook propaga essa variável ao script remoto via `environment:`, então a senha definida aqui é aplicada de fato na máquina. Se você rodar sem definir a variável, o script imprime um aviso bem visível antes de continuar.
+3. Reinicie a máquina e confira rapidamente (veja o checklist na seção Verificação).
 
-### Reiniciar as maquinas (opcional)
+## Política de senhas do laboratório
 
-Por padrao, o playbook **nao** reinicia as maquinas. Para habilitar o reinicio automatico, descomente a ultima tarefa em `ansible/playbook.yml`.
-
-## Aviso: Firefox via snap
-
-No Ubuntu 24.04+, o Firefox e instalado por padrao via **snap**. Devido ao sandboxing do snap, o arquivo `policies.json` em `/etc/firefox/policies/` pode nao ser respeitado corretamente. O script de provisionamento detecta isso e exibe um aviso.
-
-Recomendacao: trocar para a versao `.deb`/apt tradicional do Firefox:
-```bash
-sudo snap remove firefox
-sudo apt install firefox
-```
-
-## Pos-deploy — checklist de verificacao
-
-Apos cada execucao do provisionamento, validar se tudo ficou correto antes de liberar a maquina para os alunos:
-
-| Verificacao | Comando | Esperado |
+| Conta | Senha | Observação |
 |---|---|---|
-| DNS ativo | `resolvectl status` | Lista `1.1.1.3` e `1.0.0.3` como DNS |
-| DNSOverTLS | `resolvectl status` | `DNSOverTLS: yes` (ou `opportunistic`) |
-| NetworkManager respeita resolved | `grep dns /etc/NetworkManager/conf.d/99-penguinlab-dns.conf` | `dns=systemd-resolved` |
-| Firefox policies | Abrir `about:policies` no Firefox | Todas as restricoes visiveis |
-| Firefox sem seu proprio DNS | `about:policies` → `DNSOverHTTPS` | `Enabled: false, Locked: true` |
-| Usuario nao tem sudo | `sudo -l` (como `aluno`) | `not allowed` |
-| Aluno nao loga via SSH | `ssh aluno@<ip-da-maquina>` (a partir de outra maquina) | Conexao recusada |
-| polkit bloqueia NM | `pkexec nm-connection-editor` (como `aluno`) | Pede senha de admin ou falha |
-| polkit bloqueia install | `pkexec apt install hello` (como `aluno`) | Falha / pede senha |
-| Shell do aluno livre | `su - aluno` → `echo $SHELL` | `/bin/bash` |
+| `aluno` | `aluno` (uniforme em todas as máquinas) | Existe para facilitar o uso pelas crianças; com o **autologin**, essa senha só é usada no desbloqueio de tela. Como a conta não tem privilégio nenhum, o risco é baixo |
+| `professor` | **Forte** e igual em todas as máquinas | É a conta com sudo; se vazar, compromete o laboratório inteiro |
 
-### Rollback — desfazer provisao manualmente
+- A senha do `aluno` é aplicada em **toda** execução do script — reprovisionar com outro valor atualiza a senha.
+- **Nunca** use a mesma senha para `aluno` e `professor`.
+- **Nunca** chame a conta de administração de `aluno` — o próprio script bloqueia o sudo dela.
 
-Se precisar reverter o provicionamento em uma maquina:
+## Verificação pós-deploy
 
-```bash
-# 1. Remover bloqueio de sudo
-rm -f /etc/sudoers.d/penguinlab-aluno
-visudo -c   # validar antes de continuar
+| Verificação | Comando / local | Esperado |
+|---|---|---|
+| DNS filtrado | `resolvectl status` | `1.1.1.3` e `1.0.0.3` como DNS |
+| DNS-over-TLS | `resolvectl status` | `DNSOverTLS: opportunistic` |
+| NetworkManager | `grep dns /etc/NetworkManager/conf.d/99-penguinlab-dns.conf` | `dns=systemd-resolved` |
+| Firefox restrito | `about:policies` (no navegador) | Restrições listadas |
+| Firefox sem DoH próprio | `about:policies` -> `DNSOverHTTPS` | `Enabled: false, Locked: true` |
+| `aluno` sem sudo | `sudo -l -U aluno` | "not allowed" / nenhum privilégio |
+| `aluno` sem SSH remoto | `ssh aluno@<ip>` (de outra máquina) | Conexão recusada |
+| Auto-login do `aluno` | `/etc/lightdm/lightdm.conf` | `autologin-user=aluno` |
 
-# 2. Remover restricoes de polkit
-rm -f /etc/polkit-1/rules.d/90-penguinlab-restrict.rules
-systemctl restart polkit
+Com rede, o `ansible/check-status.sh` faz todas essas verificações em lote.
 
-# 3. Remover bloqueio de SSH do aluno
-rm -f /etc/ssh/sshd_config.d/90-penguinlab-no-ssh-aluno.conf
-sshd -t && (systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true)
+## Desfazer o provisionamento (rollback)
 
-# 4. Restaurar DNS padrao
-rm -f /etc/NetworkManager/conf.d/99-penguinlab-dns.conf
-if [ -f /etc/systemd/resolved.conf.penguinlab.bak ]; then
-    mv /etc/systemd/resolved.conf.penguinlab.bak /etc/systemd/resolved.conf
-else
-    rm -f /etc/systemd/resolved.conf
-fi
-systemctl restart systemd-resolved NetworkManager
+O procedimento completo está no **IMPLANTACAO.md** (seção Rollback). Em resumo: remova o bloqueio de sudo, as regras polkit, a restrição de SSH, restaure o DNS a partir do backup e remova as políticas do Firefox.
 
-# 5. Remover policies do Firefox
-rm -f /etc/firefox/policies/policies.json
+## Avisos e limitações conhecidas
 
-# 6. Remover usuario aluno (opcional — remove home tbm)
-userdel -r aluno 2>/dev/null || true
-```
+- **Firefox via snap (Ubuntu 24.04+):** o sandboxing do snap pode fazer com que o `policies.json` seja ignorado. Use o Firefox `.deb` (o Linux Mint já vem assim) — veja o guia.
+- **Limitação conhecida:** o filtro de DNS não impede que um aluno baixe um AppImage de outro navegador com DNS-over-HTTPS embutido. A mitigação completa (firewall bloqueando endpoints de DoH) está fora do escopo.
+- **Sem "reset de sessão":** o que o aluno salvar na home dele (`/home/aluno`) persiste — não há limpeza automática ao religar a máquina.
 
-## Licenca
+## Licença
 
-Este e um projeto interno para uso em laboratorios educacionais.
+Projeto interno para uso em laboratórios educacionais.
