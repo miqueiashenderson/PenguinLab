@@ -13,6 +13,10 @@
 #   ./bootstrap-ssh.sh <ip1> [ip2 ...]        (ja com os IPs)
 #   ./bootstrap-ssh.sh --descobrir <rede>     (ex: 192.168.0)
 #
+# Ao final, os IPs que concluiram o bootstrap com sucesso (SSH sem senha
+# validado) sao gravados em hosts-ok.txt (uma IP por linha, sem duplicatas),
+# acumulando entre execucoes — use o arquivo para montar o inventory.ini.
+#
 # Pre-requisitos manuais em cada maquina:
 #   - Linux Mint instalado
 #   - Conta admin criada (ex: professor) - NUNCA "aluno"
@@ -26,6 +30,7 @@ set -euo pipefail
 USUARIO_ADMIN="${PENGUINLAB_ADMIN:-professor}"
 SSH_OPTS="-o ConnectTimeout=5 -o StrictHostKeyChecking=no -o BatchMode=no"
 LOG="bootstrap-ssh.log"
+ARQUIVO_OK="hosts-ok.txt"
 
 # Cores (desabilitadas fora de terminal interativo)
 if [ -t 1 ]; then
@@ -37,6 +42,16 @@ fi
 log()   { echo -e "${VERDE}[+]${NORMAL} $*" | tee -a "$LOG"; }
 aviso() { echo -e "${AMARELO}[!]${NORMAL} $*" | tee -a "$LOG"; }
 erro()  { echo -e "${VERMELHO}[*]${NORMAL} $*" | tee -a "$LOG"; }
+
+# Grava o IP com bootstrap completo em hosts-ok.txt (sem duplicatas).
+adicionar_ip_ok() {
+    local ip="$1"
+    touch "$ARQUIVO_OK"
+    if ! grep -qxF "$ip" "$ARQUIVO_OK" 2>/dev/null; then
+        echo "$ip" >> "$ARQUIVO_OK"
+        log "$ip: gravado em $ARQUIVO_OK."
+    fi
+}
 
 # ============================================================
 # PREPARAR UMA MAQUINA
@@ -93,6 +108,7 @@ preparar_maquina() {
     # 3. Validar conexao sem senha
     if ssh ${SSH_OPTS} -o BatchMode=yes "${USUARIO_ADMIN}@${host}" "echo ok" >/dev/null 2>&1; then
         log "$host: conexao SSH sem senha OK."
+        adicionar_ip_ok "$host"
     else
         aviso "$host: conexao sem senha FALHOU."
     fi
@@ -176,6 +192,9 @@ main() {
 
     echo ""
     log "Bootstrap concluido."
+    local qtd_ok=0
+    [ -f "$ARQUIVO_OK" ] && qtd_ok=$(grep -c . "$ARQUIVO_OK" || true)
+    log "IPs com bootstrap OK: $qtd_ok (salvos em $ARQUIVO_OK)."
     log "Agora edite o inventory.ini com os IPs e rode o playbook:"
     log "  ansible-playbook -i inventory.ini playbook.yml"
 }

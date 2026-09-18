@@ -166,6 +166,7 @@ Prepara as máquinas após a instalação manual do sistema. Executado no notebo
 - **Preparação:** garante `openssh-server` e `python3` (esforço máximo, sem falha fatal), copia a chave pública do notebook para a conta `professor` (via `ssh-copy-id`) e valida o login sem senha.
 - **Chave:** gera automaticamente `~/.ssh/id_ed25519` se ainda não existir.
 - **Configuração:** `USUARIO_ADMIN` (padrão `professor`, via `PENGUINLAB_ADMIN`), log em `bootstrap-ssh.log`.
+- **Resultado gravado:** os IPs com bootstrap completo (SSH sem senha validado) são **acumulados** em `hosts-ok.txt` na pasta `ansible/` (uma IP por linha, sem duplicatas entre execuções) — serve de base para montar o `inventory.ini`. O arquivo é específico do laboratório e não vai para o repositório (gitignored).
 
 ### 6.2 `check-status.sh`
 
